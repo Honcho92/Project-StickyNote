@@ -68,3 +68,9 @@ Ideas we haven't built yet:
 - `workspace.py` — tag notes into workspaces and toggle a whole set.
 
 Say the word and we'll add them.
+
+## Related projects
+
+- **[scam-shield](https://github.com/Honcho92/scam-shield)** — Local-first
+  scam detection toolkit: heuristic engine, local LLM judge (Ollama),
+  Telegram bot, and a Chrome extension. Generates FTC-ready report packs.
