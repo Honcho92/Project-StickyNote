@@ -14,15 +14,13 @@ Architecture
 """
 
 import json
-import os
-import sys
 import time
 import threading
 import traceback
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 
 # Optional Windows integration
 try:
@@ -38,11 +36,14 @@ except ImportError:
     HAVE_PSUTIL = False
 
 # System tray (optional; app still works without it)
+# Note: importing pystray can raise more than ImportError (e.g. a ValueError when
+# no suitable GUI backend/namespace is available), so catch broadly and just fall
+# back to no-tray mode instead of crashing the whole app at import time.
 try:
     import pystray
     from PIL import Image, ImageDraw
     HAVE_TRAY = True
-except ImportError:
+except Exception:
     HAVE_TRAY = False
 
 import plugins
@@ -506,8 +507,6 @@ class App:
         self._save_job = None
         self._running = True
         self.last_context = None
-        # Track our own window HWNDs so we don't react when a note itself is focused
-        self._own_hwnds = set()
 
         self._load()
         for data in self.notes.values():
@@ -579,10 +578,39 @@ class App:
     def _spawn_window(self, data):
         nw = NoteWindow(self, data)
         self.windows[data.id] = nw
+
+    @staticmethod
+    def _root_hwnd(hwnd):
+        """Top-level (root) HWND for a given window handle, or the handle itself."""
+        if not hwnd or win32gui is None:
+            return hwnd
         try:
-            self._own_hwnds.add(int(nw.win.winfo_id()))
+            # GA_ROOT = 2 -> the root window of the owner chain, which is what
+            # GetForegroundWindow() reports for a focused note.
+            return win32gui.GetAncestor(hwnd, 2)
         except Exception:
-            pass
+            return hwnd
+
+    def _is_own_window(self, hwnd):
+        """True if `hwnd` (the current foreground window) is one of our notes.
+
+        tk's winfo_id() returns the *child* content HWND, while
+        GetForegroundWindow() returns the *top-level* HWND, so compare at the
+        root-ancestor level rather than expecting the raw ids to be equal.
+        """
+        if not hwnd or win32gui is None:
+            return False
+        fg_root = self._root_hwnd(hwnd)
+        for nw in self.windows.values():
+            try:
+                cid = int(nw.win.winfo_id())
+            except Exception:
+                continue
+            if hwnd == cid or fg_root == cid:
+                return True
+            if fg_root == self._root_hwnd(cid):
+                return True
+        return False
 
     def delete_note(self, nid):
         if nid in self.windows:
@@ -597,6 +625,10 @@ class App:
             data.hidden_by_user = False
         for nw in self.windows.values():
             nw.refresh_pin_label()
+        # Re-apply visibility right away so un-hidden notes come back immediately
+        # (whether they display still depends on their pin rules) instead of
+        # waiting for the next monitor tick.
+        self._apply_visibility(self.last_context or {})
         self.save()
 
     # ---- Monitor loop ------------------------------------------------------
@@ -607,7 +639,7 @@ class App:
                 # If our own sticky-note is focused, keep the previous context
                 # so we don't hide pinned notes while the user edits them.
                 hwnd = ctx.get("hwnd") or 0
-                if hwnd in self._own_hwnds and self.last_context:
+                if self._is_own_window(hwnd) and self.last_context:
                     ctx = self.last_context
                 else:
                     self.last_context = ctx
