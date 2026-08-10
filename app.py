@@ -14,6 +14,10 @@ Architecture
 """
 
 import json
+import os
+import shutil
+import socket
+import sys
 import time
 import threading
 import traceback
@@ -49,10 +53,61 @@ except Exception:
 import plugins
 
 # ---------------------------------------------------------------------------
+APP_NAME = "StickyNotes"
+APP_VERSION = "1.0.0"
+
+
+def _data_dir():
+    """Per-user, always-writable data directory.
+
+    Notes must not live next to the program: once StickyNotes is installed to a
+    read-only location (e.g. Program Files) or run as a packaged one-file .exe,
+    the app folder isn't writable. %APPDATA%\\StickyNotes always is.
+    """
+    base = (os.environ.get("APPDATA")            # Windows
+            or os.environ.get("XDG_DATA_HOME")   # Linux
+            or os.path.expanduser("~"))
+    d = Path(base) / APP_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 APP_DIR = Path(__file__).parent
-NOTES_DIR = APP_DIR / "notes"
-NOTES_FILE = NOTES_DIR / "notes.json"
-NOTES_DIR.mkdir(exist_ok=True)
+DATA_DIR = _data_dir()
+NOTES_FILE = DATA_DIR / "notes.json"
+ERROR_LOG = DATA_DIR / "error.log"
+
+# One-time migration: older builds stored notes next to the app.
+_OLD_NOTES = APP_DIR / "notes" / "notes.json"
+if _OLD_NOTES.exists() and not NOTES_FILE.exists():
+    try:
+        shutil.copyfile(_OLD_NOTES, NOTES_FILE)
+    except Exception:
+        pass
+
+# Keep a single instance: two copies writing notes.json would clobber each other.
+_INSTANCE_LOCK = None
+
+
+def _acquire_single_instance():
+    """True if we're the only running instance.
+
+    Binds a fixed localhost port as a lock; the OS releases it automatically if
+    the process exits or crashes, so there's no stale lock file to clean up.
+    """
+    global _INSTANCE_LOCK
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 49713))
+    except OSError:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return False
+    s.listen(1)
+    _INSTANCE_LOCK = s  # hold the reference for the process lifetime
+    return True
 
 COLORS = {
     "Yellow": "#FFF4A3",
@@ -512,8 +567,17 @@ class App:
         for data in self.notes.values():
             self._spawn_window(data)
 
+        # System tray is preferred; fall back to a small control window if it's
+        # unavailable (pystray missing, or its backend fails to start).
+        self._tray_active = False
         if HAVE_TRAY:
-            self._setup_tray()
+            try:
+                self._setup_tray()
+                self._tray_active = True
+            except Exception:
+                traceback.print_exc()
+        if not self._tray_active:
+            self._setup_fallback_window()
 
         # Background thread to watch foreground window
         threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -528,8 +592,8 @@ class App:
                 "• Click 📌 to pin this note to the app or webpage\n"
                 "   you're currently looking at — it'll hide itself\n"
                 "   when you switch away, and pop back when you return.\n\n"
-                "Open the system tray (arrow near the clock) to\n"
-                "create more notes or exit."
+                "Use the tray icon (arrow near the clock) — or the small\n"
+                "StickyNotes bar — to create more notes or exit."
             ))
 
     # ---- Storage -----------------------------------------------------------
@@ -674,11 +738,27 @@ class App:
         self.tray = pystray.Icon("StickyNotes", img, "StickyNotes", menu)
         threading.Thread(target=self.tray.run, daemon=True).start()
 
+    def _setup_fallback_window(self):
+        """Tiny always-on-top control bar for when there's no system tray, so
+        the user can always create notes and exit cleanly."""
+        win = tk.Toplevel(self.root)
+        win.title("StickyNotes")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self.quit)
+        bar = tk.Frame(win, padx=8, pady=6)
+        bar.pack()
+        tk.Label(bar, text="StickyNotes", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        tk.Button(bar, text="New note", command=self.new_note).pack(side="left", padx=2)
+        tk.Button(bar, text="Show all", command=self.show_all).pack(side="left", padx=2)
+        tk.Button(bar, text="Exit", command=self.quit).pack(side="left", padx=2)
+        self._fallback_win = win
+
     # ---- Shutdown ----------------------------------------------------------
     def quit(self):
         self._running = False
         self.save()
-        if HAVE_TRAY:
+        if self._tray_active:
             try:
                 self.tray.stop()
             except Exception:
@@ -697,12 +777,21 @@ class App:
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    if not _acquire_single_instance():
+        # Already running — notify (best effort) and exit quietly.
+        try:
+            r = tk.Tk()
+            r.withdraw()
+            messagebox.showinfo(APP_NAME, "StickyNotes is already running.")
+            r.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
     try:
         App().run()
     except Exception:
         # Surface any crash to a log file since we launch via pythonw (no console)
-        log = APP_DIR / "error.log"
-        with open(log, "a", encoding="utf-8") as f:
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
             f.write("\n---\n")
             traceback.print_exc(file=f)
         raise
