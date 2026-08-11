@@ -4,7 +4,13 @@ __pycache__/
 notes/notes.json
 notes/notes.tmp
 error.log
+*.log
 *.egg-info/
 dist/
 build/
+installer/
+_git_lock_trash/
 .env
+*.pfx
+*.cer
+*.pvk
