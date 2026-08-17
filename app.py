@@ -21,6 +21,7 @@ import sys
 import time
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -51,10 +52,11 @@ except Exception:
     HAVE_TRAY = False
 
 import plugins
+import licensing
 
 # ---------------------------------------------------------------------------
 APP_NAME = "StickyNotes"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def _data_dir():
@@ -522,6 +524,12 @@ class PinDialog:
     def _add(self, ptype, pat):
         if not pat:
             return
+        if plugins.is_pro_plugin(ptype) and not licensing.is_pro():
+            self.app.prompt_upgrade(
+                f"“{plugins.get(ptype).LABEL}” is a Pro pin type.\n"
+                "Upgrade to Pro to pin notes to websites, files, and times of day."
+            )
+            return
         rule = [ptype, pat]
         if rule not in self.data.pin_rules:
             self.data.pin_rules.append(rule)
@@ -631,6 +639,14 @@ class App:
 
     # ---- Note lifecycle ----------------------------------------------------
     def new_note(self, content=""):
+        limit = licensing.note_limit()
+        if limit is not None and len(self.notes) >= limit:
+            self.prompt_upgrade(
+                f"The free version keeps up to {limit} notes.\n"
+                "Upgrade to Pro for unlimited notes (plus website, file and "
+                "time-of-day pins)."
+            )
+            return
         nid = self._next_id
         self._next_id += 1
         offset = (nid * 24) % 200
@@ -638,6 +654,72 @@ class App:
         self.notes[nid] = data
         self._spawn_window(data)
         self.save()
+
+    # ---- Licensing / Pro ---------------------------------------------------
+    def prompt_upgrade(self, message):
+        """Explain a Pro limit and offer to buy or enter a key."""
+        top = tk.Toplevel(self.root)
+        top.title("StickyNotes Pro")
+        top.attributes("-topmost", True)
+        top.resizable(False, False)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        tk.Label(top, text="✨ StickyNotes Pro", font=("Segoe UI", 13, "bold")).pack(padx=24, pady=(18, 4))
+        tk.Label(top, text=message, font=("Segoe UI", 10), justify="left",
+                 wraplength=360).pack(padx=24, pady=(0, 12))
+        row = tk.Frame(top)
+        row.pack(padx=24, pady=(0, 18))
+        tk.Button(row, text="Buy Pro", width=12,
+                  command=lambda: (webbrowser.open(licensing.BUY_URL), top.destroy())).pack(side="left", padx=4)
+        tk.Button(row, text="Enter license key",
+                  command=lambda: (top.destroy(), self.open_license_dialog())).pack(side="left", padx=4)
+        tk.Button(row, text="Not now", command=top.destroy).pack(side="left", padx=4)
+
+    def open_license_dialog(self):
+        st = licensing.status()
+        dlg = tk.Toplevel(self.root)
+        dlg.title("StickyNotes license")
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+
+        if st["reason"] == "licensed":
+            head = "Pro is active" + (f"  ·  {st['email']}" if st.get("email") else "")
+        elif st["reason"] == "trial":
+            head = f"Free trial — {st['trial_days_left']} day(s) of Pro left"
+        else:
+            head = "Free version"
+        tk.Label(dlg, text=head, font=("Segoe UI", 12, "bold")).pack(padx=24, pady=(18, 2))
+        tk.Label(dlg, text="Paste your Pro license key below and click Activate.",
+                 font=("Segoe UI", 9), fg="#555").pack(padx=24, pady=(0, 10))
+
+        key_var = tk.StringVar()
+        entry = tk.Entry(dlg, textvariable=key_var, width=48, font=("Consolas", 10))
+        entry.pack(padx=24)
+        entry.focus_set()
+        msg = tk.Label(dlg, text="", font=("Segoe UI", 9), wraplength=380, justify="left")
+        msg.pack(padx=24, pady=(8, 0))
+
+        def do_activate():
+            ok, text = licensing.activate(key_var.get())
+            msg.configure(text=text, fg=("#1b5e20" if ok else "#b00020"))
+            if ok:
+                for nw in self.windows.values():
+                    nw.refresh_pin_label()
+                if self._tray_active:
+                    self._rebuild_tray_menu()
+
+        row = tk.Frame(dlg)
+        row.pack(padx=24, pady=16)
+        tk.Button(row, text="Activate", width=12, command=do_activate).pack(side="left", padx=4)
+        tk.Button(row, text="Buy Pro",
+                  command=lambda: webbrowser.open(licensing.BUY_URL)).pack(side="left", padx=4)
+        tk.Button(row, text="Close", command=dlg.destroy).pack(side="left", padx=4)
 
     def _spawn_window(self, data):
         nw = NoteWindow(self, data)
@@ -725,18 +807,39 @@ class App:
         for y in (24, 34, 44):
             d.line([(14, y), (50, y)], fill="#5D4037", width=2)
 
+        self.tray = pystray.Icon("StickyNotes", img, "StickyNotes", self._build_tray_menu())
+        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def _build_tray_menu(self):
         def on_new(_i, _it): self.root.after(0, self.new_note)
         def on_show_all(_i, _it): self.root.after(0, self.show_all)
+        def on_license(_i, _it): self.root.after(0, self.open_license_dialog)
         def on_quit(_i, _it): self.root.after(0, self.quit)
 
-        menu = pystray.Menu(
+        def status_text(_item):
+            st = licensing.status()
+            if st["reason"] == "licensed":
+                return "★ Pro active"
+            if st["reason"] == "trial":
+                return f"Pro trial: {st['trial_days_left']} day(s) left"
+            return "Free version"
+
+        return pystray.Menu(
+            pystray.MenuItem(status_text, None, enabled=False),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("New note", on_new, default=True),
             pystray.MenuItem("Show all hidden notes", on_show_all),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Enter license key / Buy Pro…", on_license),
             pystray.MenuItem("Exit", on_quit),
         )
-        self.tray = pystray.Icon("StickyNotes", img, "StickyNotes", menu)
-        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def _rebuild_tray_menu(self):
+        try:
+            self.tray.menu = self._build_tray_menu()
+            self.tray.update_menu()
+        except Exception:
+            pass
 
     def _setup_fallback_window(self):
         """Tiny always-on-top control bar for when there's no system tray, so

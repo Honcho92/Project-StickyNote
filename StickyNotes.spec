@@ -14,9 +14,13 @@ a = Analysis(
     hiddenimports=[
         'pystray._win32',
         'win32timezone',
+        'licensing',
         'plugins',
         'plugins.window_title',
         'plugins.process_name',
+        'plugins.browser_url',
+        'plugins.file_path',
+        'plugins.time_of_day',
     ],
     hookspath=[],
     hooksconfig={},

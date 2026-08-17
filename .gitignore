@@ -14,3 +14,6 @@ _git_lock_trash/
 *.pfx
 *.cer
 *.pvk
+make_license.py
+license_private_key*
+license.json
