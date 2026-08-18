@@ -17,3 +17,4 @@ _git_lock_trash/
 make_license.py
 license_private_key*
 license.json
+_signtest/
