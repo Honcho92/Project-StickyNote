@@ -53,10 +53,14 @@ except Exception:
 
 import plugins
 import licensing
+try:
+    import transcriber
+except Exception:
+    transcriber = None
 
 # ---------------------------------------------------------------------------
 APP_NAME = "StickyNotes"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 def _data_dir():
@@ -248,6 +252,7 @@ class NoteWindow:
         mkbtn("+", self.app.new_note)          # new sibling note
         mkbtn("🎨", self._cycle_color)
         mkbtn("📌", self.open_pin_dialog)
+        self.mic_btn = mkbtn("🎙", self._toggle_record)  # voice note
         mkbtn("–", self.hide_note)             # user-hide
         mkbtn("×", self.delete_note)           # delete
 
@@ -300,6 +305,112 @@ class NoteWindow:
         self.menu.add_separator()
         self.menu.add_command(label="Hide (keep)", command=self.hide_note)
         self.menu.add_command(label="Delete note", command=self.delete_note)
+
+    # ---- Voice notes (on-device transcription) -----------------------------
+    def _toggle_record(self):
+        if transcriber is None or not transcriber.available():
+            reason = (transcriber.unavailable_reason() if transcriber
+                      else "Voice notes aren't available in this build.")
+            messagebox.showinfo("Voice notes", reason)
+            return
+        if getattr(self, "_recording", False):
+            self._finish_recording()
+        else:
+            self._begin_recording()
+
+    def _begin_recording(self):
+        is_pro = licensing.is_pro()
+        try:
+            self._recorder = transcriber.Recorder(
+                is_pro=is_pro,
+                on_cap=lambda: self.win.after(0, self._finish_recording),
+            )
+            self._recorder.start()
+        except Exception as e:
+            messagebox.showerror("Voice notes", "Couldn't start recording:\n\n%s" % e)
+            self._recorder = None
+            return
+        self._recording = True
+        self._rec_pro = is_pro
+        self._rec_start = time.time()
+        try:
+            self.mic_btn.config(text="\u23f9")
+        except Exception:
+            pass
+        self._tick_record()
+
+    def _tick_record(self):
+        if not getattr(self, "_recording", False):
+            return
+        elapsed = time.time() - getattr(self, "_rec_start", time.time())
+        if getattr(self, "_rec_pro", False):
+            label = "\u23f9 %d:%02d" % (int(elapsed) // 60, int(elapsed) % 60)
+        else:
+            remaining = max(0, int(transcriber.PREVIEW_SECONDS - elapsed))
+            label = "\u23f9 %ds" % remaining
+        try:
+            self.mic_btn.config(text=label)
+        except Exception:
+            pass
+        self.win.after(250, self._tick_record)
+
+    def _finish_recording(self):
+        if not getattr(self, "_recording", False):
+            return
+        self._recording = False
+        rec = getattr(self, "_recorder", None)
+        if rec is None:
+            return
+        try:
+            rec.stop()
+        except Exception:
+            pass
+        try:
+            self.mic_btn.config(text="\u23f3")
+        except Exception:
+            pass
+        status = ("\u23f3 downloading voice model\u2026"
+                  if not transcriber.model_present() else "\u23f3 transcribing\u2026")
+        try:
+            self.pin_label.config(text=status)
+        except Exception:
+            pass
+        capped = rec.capped
+
+        def work():
+            try:
+                text = rec.transcribe()
+                err = None
+            except Exception as e:
+                text, err = "", e
+            self.win.after(0, lambda: self._on_transcribed(text, err, capped))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_transcribed(self, text, err, capped):
+        try:
+            self.mic_btn.config(text="\U0001F399")
+        except Exception:
+            pass
+        try:
+            self.refresh_pin_label()
+        except Exception:
+            pass
+        self._recorder = None
+        if err is not None:
+            messagebox.showerror("Voice notes", "Transcription failed:\n\n%s" % err)
+            return
+        if text:
+            existing = self.text.get("1.0", "end-1c")
+            if existing and not existing.endswith((" ", "\n")):
+                self.text.insert("insert", " ")
+            self.text.insert("insert", text + " ")
+            self._on_text_change()
+        if capped and not licensing.is_pro():
+            self.app.prompt_upgrade(
+                "Free voice notes are limited to %d seconds per clip.\n"
+                "Upgrade to Pro for unlimited voice transcription."
+                % transcriber.PREVIEW_SECONDS)
 
     def _pin_label_text(self):
         if self.data.hidden_by_user:

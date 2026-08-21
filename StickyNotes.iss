@@ -3,7 +3,7 @@
 ; Compile with:  build_installer.bat   (or:  iscc StickyNotes.iss)
 
 #define MyAppName "StickyNotes"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "StickyNotes"
 #define MyAppExeName "StickyNotes.exe"
 

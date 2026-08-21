@@ -40,8 +40,16 @@ FREE_NOTE_LIMIT = 5
 TRIAL_DAYS = 14
 
 # Store (Gumroad) settings
-BUY_URL = "https://zachfollett.gumroad.com/l/zzcfwu"
-GUMROAD_PRODUCT_ID = "Kk2X-9yBImV_lx_f3XtUjg=="
+BUY_URL = "https://zachfollett.gumroad.com/l/zskxyl"
+# Primary = the live product's ID (product at /l/zskxyl). We also check any
+# legacy IDs, so a real key validates no matter which historical product it
+# was minted against. A key only ever validates against its own product, so
+# checking several IDs is safe -- it can never cause a false unlock.
+GUMROAD_PRODUCT_ID = "8Txl-xK4tmceGmPn-ChDjA=="
+GUMROAD_PRODUCT_IDS = [
+    "8Txl-xK4tmceGmPn-ChDjA==",   # current live product (zskxyl)
+    "Kk2X-9yBImV_lx_f3XtUjg==",   # legacy product id, kept as a fallback
+]
 GUMROAD_VERIFY_URL = "https://api.gumroad.com/v2/licenses/verify"
 
 
@@ -95,15 +103,11 @@ def verify_key(key):
 
 
 # ---- Gumroad store keys ----------------------------------------------------
-def gumroad_verify(key):
-    """Verify a Gumroad license key online. Returns {'email':..} on success,
-    None on failure (invalid key, refunded, or no network). Called once at
-    activation; we do NOT increment the use count so reinstalling won't lock
-    anyone out."""
-    if not GUMROAD_PRODUCT_ID or not key:
-        return None
+def _gumroad_verify_one(product_id, key):
+    """POST a single (product_id, key) pair to Gumroad. Returns {'email':..}
+    on a valid, non-refunded purchase, else None."""
     data = urllib.parse.urlencode({
-        "product_id": GUMROAD_PRODUCT_ID,
+        "product_id": product_id,
         "license_key": key.strip(),
         "increment_uses_count": "false",
     }).encode()
@@ -124,6 +128,22 @@ def gumroad_verify(key):
     if purchase.get("refunded") or purchase.get("chargebacked") or purchase.get("disputed"):
         return None
     return {"email": purchase.get("email", "")}
+
+
+def gumroad_verify(key):
+    """Verify a Gumroad license key online. Tries each known product ID and
+    returns {'email':..} on the first success, None on failure (invalid key,
+    refunded, or no network). Called once at activation; we do NOT increment
+    the use count so reinstalling won't lock anyone out."""
+    if not key:
+        return None
+    for pid in GUMROAD_PRODUCT_IDS:
+        if not pid:
+            continue
+        res = _gumroad_verify_one(pid, key)
+        if res is not None:
+            return res
+    return None
 
 
 # ---- persistent state ------------------------------------------------------
